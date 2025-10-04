@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Tap-to-place AR Image (drag + pinch)</title>
+  <style>
+    html, body { margin:0; padding:0; height:100%; overflow:hidden; font-family: system-ui, -apple-system, Segoe UI, Roboto; }
+    #ui {
+      position: fixed; inset: 0; pointer-events: none; display:flex; align-items:flex-end; justify-content:center;
+      padding: 16px; background: radial-gradient(transparent, rgba(0,0,0,0.05));
+    }
+    #hint {
+      pointer-events:none; color:white; text-shadow:0 1px 2px rgba(0,0,0,.6); background: rgba(0,0,0,.25);
+      padding:6px 10px; border-radius:999px; font-size:14px;
+    }
+    #enter { position: fixed; left: 16px; top: 16px; z-index: 5; }
+    button {
+      pointer-events:auto; padding:10px 14px; border-radius:10px; border:1px solid #ddd; background:#fff; font-weight:600;
+    }
+  </style>
+</head>
+<body>
+  <button id="enter">Start AR</button>
+  <div id="ui"><div id="hint">tap to place • drag to move • pinch to resize</div></div>
+
+  <!-- three.js + helpers -->
+  <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.160.0/examples/jsm/webxr/ARButton.js"></script>
+
+  <script>
+  (async function () {
+    const IMAGE_URL = 'https://images.unsplash.com/photo-1529626455594-4ff0802cfb7e?w=1200&q=80&auto=format&fit=crop';
+
+    let renderer, scene, camera, reticle, imageMesh, controller;
+    let hitTestSource = null, hitTestSourceRequested = false;
+    let transientHitTestSource = null;
+    let dragging = false;
+    const enterBtn = document.getElementById('enter');
+
+    init();
+
+    function init() {
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera();
+      scene.add(camera);
+
+      // subtle light so the textured plane isn't too dark on some devices
+      scene.add(new THREE.HemisphereLight(0xffffff, 0xbbbbff, 0.6));
+
+      // reticle to show hit location
+      reticle = new THREE.Mesh(
+        new THREE.RingGeometry(0.08, 0.1, 32).rotateX(-Math.PI / 2),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.75 })
+      );
+      reticle.matrixAutoUpdate = false;
+      reticle.visible = false;
+      scene.add(reticle);
+
+      // input source (screen tap)
+      controller = renderer.xr.getController(0);
+      controller.addEventListener('select', onSelectPlace);        // quick tap = place / reposition
+      controller.addEventListener('selectstart', () => dragging = true);
+      controller.addEventListener('selectend', () => dragging = false);
+      scene.add(controller);
+
+      window.addEventListener('resize', onResize);
+
+      // start button (explicit user gesture for AR session)
+      enterBtn.addEventListener('click', startAR);
+    }
+
+    async function startAR() {
+      // request AR session with hit-test + transient hit-test (for drag under fingertip)
+      const sessionInit = {
+        requiredFeatures: ['hit-test'],
+        optionalFeatures: ['dom-overlay'],
+        domOverlay: { root: document.body }
+      };
+
+      const session = await navigator.xr.requestSession('immersive-ar', sessionInit);
+      // hit test sources
+      const viewerSpace = await session.requestReferenceSpace('viewer');
+      hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+
+      // transient hit test under active touch input
+      try {
+        transientHitTestSource = await session.requestHitTestSourceForTransientInput({ profile: 'screen-touch' });
+      } catch (e) {
+        // some browsers may not support transient input yet – dragging will fall back to reticle-follow
+        transientHitTestSource = null;
+      }
+
+      hitTestSourceRequested = true;
+
+      renderer.xr.setReferenceSpaceType('local');
+      await renderer.xr.setSession(session);
+
+      // replace button with native AR button label (optional)
+      enterBtn.style.display = 'none';
+
+      renderer.setAnimationLoop(renderAR);
+
+      // build the image plane lazily (once) so texture is ready when user taps
+      if (!imageMesh) {
+        imageMesh = await makeImagePlane(IMAGE_URL);
+        imageMesh.visible = false;
+        scene.add(imageMesh);
+      }
+    }
+
+    function onResize() {
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    async function makeImagePlane(url) {
+      const tex = await new THREE.TextureLoader().loadAsync(url);
+      tex.colorSpace = THREE.SRGBColorSpace;
+
+      // keep aspect ratio: make width 0.6m by default
+      const aspect = tex.image.width / tex.image.height;
+      const width = 0.6;
+      const height = width / aspect;
+
+      const geom = new THREE.PlaneGeometry(width, height);
+      const mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide });
+      const mesh = new THREE.Mesh(geom, mat);
+
+      // face the user initially
+      mesh.rotation.x = -Math.PI * 0.0;
+      mesh.frustumCulled = false;
+      return mesh;
+    }
+
+    function onSelectPlace() {
+      // simple: tap places (or re-places) at the reticle
+      if (!reticle.visible) return;
+      if (!imageMesh) return;
+
+      imageMesh.visible = true;
+      imageMesh.matrix.copy(reticle.matrix);
+      imageMesh.matrix.decompose(imageMesh.position, imageMesh.quaternion, imageMesh.scale);
+    }
+
+    // -------- Pinch to scale (DOM overlay pointer events) --------
+    let pointers = new Map();
+    let baseDistance = 0;
+    let baseScale = 1;
+
+    function getDistance() {
+      if (pointers.size < 2) return 0;
+      const pts = Array.from(pointers.values());
+      const dx = pts[0].clientX - pts[1].clientX;
+      const dy = pts[0].clientY - pts[1].clientY;
+      return Math.hypot(dx, dy);
+    }
+
+    function onPointerDown(e) {
+      pointers.set(e.pointerId, e);
+      if (pointers.size === 2 && imageMesh?.visible) {
+        baseDistance = getDistance();
+        baseScale = imageMesh.scale.x; // uniform scale
+      }
+    }
+    function onPointerMove(e) {
+      if (!pointers.has(e.pointerId)) return;
+      pointers.set(e.pointerId, e);
+
+      // drag: if one finger down, move image under fingertip using transient hit test (if available)
+      if (dragging && imageMesh?.visible) {
+        // handled each frame in renderAR via transient hit test for smoother updates
+      }
+
+      // pinch scale
+      if (pointers.size === 2 && baseDistance > 0 && imageMesh?.visible) {
+        const d = getDistance();
+        if (d > 0) {
+          const s = THREE.MathUtils.clamp((d / baseDistance) * baseScale, 0.2, 4.0);
+          imageMesh.scale.setScalar(s);
+        }
+      }
+    }
+    function onPointerUp(e) {
+      pointers.delete(e.pointerId);
+      if (pointers.size < 2) baseDistance = 0;
+    }
+
+    // attach to canvas so it works in-session
+    document.addEventListener('pointerdown', onPointerDown, { passive: true });
+    document.addEventListener('pointermove', onPointerMove, { passive: true });
+    document.addEventListener('pointerup', onPointerUp, { passive: true });
+    document.addEventListener('pointercancel', onPointerUp, { passive: true });
+    document.addEventListener('pointerout', onPointerUp, { passive: true });
+    document.addEventListener('pointerleave', onPointerUp, { passive: true });
+
+    // -------- render loop with hit-tests --------
+    function renderAR(timestamp, frame) {
+      const session = renderer.xr.getSession();
+      const refSpace = renderer.xr.getReferenceSpace();
+      if (!frame || !refSpace) {
+        renderer.render(scene, camera);
+        return;
+      }
+
+      // center-screen hit test for placement reticle
+      if (hitTestSource) {
+        const results = frame.getHitTestResults(hitTestSource);
+        if (results.length) {
+          const pose = results[0].getPose(refSpace);
+          reticle.visible = true;
+          reticle.matrix.fromArray(pose.transform.matrix);
+        } else {
+          reticle.visible = false;
+        }
+      }
+
+      // dragging: use transient hit test under the active touch to move the image along real surfaces
+      if (dragging && transientHitTestSource && imageMesh?.visible) {
+        const transientResults = frame.getHitTestResultsForTransientInput(transientHitTestSource);
+        if (transientResults.length) {
+          // choose the first touch’s best surface hit
+          const tr = transientResults[0];
+          if (tr.results.length) {
+            const pose = tr.results[0].getPose(refSpace);
+            imageMesh.position.setFromMatrixPosition(new THREE.Matrix4().fromArray(pose.transform.matrix));
+
+            // face the camera while staying upright
+            const cam = renderer.xr.getCamera(camera);
+            imageMesh.lookAt(cam.position);
+            // keep upright by zeroing roll/pitch around vertical axis
+            imageMesh.rotation.x = 0;
+            imageMesh.rotation.z = 0;
+          }
+        }
+      }
+
+      renderer.render(scene, camera);
+    }
+  })();
+  </script>
+</body>
+</html>
