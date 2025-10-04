@@ -1,234 +1,237 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>AR image • smooth drag & pinch</title>
-  <style>
-    html, body { margin:0; height:100%; overflow:hidden; font-family: system-ui, -apple-system, Segoe UI, Roboto; }
-    #enter { position: fixed; left: 16px; top: 16px; z-index: 5; }
-    #ui { position: fixed; inset: 0; pointer-events:none; display:flex; align-items:flex-end; justify-content:center; padding: 16px; }
-    #hint { pointer-events:none; color:white; text-shadow:0 1px 2px rgba(0,0,0,.6); background: rgba(0,0,0,.25); padding:6px 10px; border-radius:999px; font-size:14px; }
-    button { pointer-events:auto; padding:10px 14px; border-radius:10px; border:1px solid #ddd; background:#fff; font-weight:600; }
-  </style>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Friend Cards – mobile/desktop gestures</title>
+<style>
+  :root { --w: 320px; --h: 460px; --r: 16px; --shadow: 0 10px 30px rgba(0,0,0,.15); }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100dvh; display:grid; place-items:center; background:#f6f7fb; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+  .wrap { width:min(92vw,360px); }
+  .status { text-align:center; margin-bottom:12px; font-size:14px; color:#555; }
+  .stage { width:var(--w); height:var(--h); margin-inline:auto; perspective: 1200px; position:relative; }
+  .card {
+    position:absolute; inset:0; border-radius:var(--r); background:#fff; box-shadow:var(--shadow);
+    transform-style:preserve-3d; transition: transform .58s cubic-bezier(.22,.61,.36,1);
+    touch-action: pan-y; /* allow horizontal gesture */
+  }
+  .card.flipped { transform: rotateY(180deg); }
+  .side { position:absolute; inset:0; backface-visibility:hidden; -webkit-backface-visibility:hidden; border-radius:var(--r); overflow:hidden; display:flex; flex-direction:column; }
+  .front { background:#fff; }
+  .back { background:#111827; color:#e5e7eb; transform: rotateY(180deg); padding:18px; gap:12px; }
+  .header { display:flex; align-items:center; justify-content:space-between; padding:14px 16px 0; }
+  .name { font-weight:650; font-size:18px; padding:6px 10px; border-radius:10px; background:#eef2ff; color:#3730a3; }
+  .gem { display:inline-flex; align-items:center; gap:6px; background:#ecfeff; color:#155e75; padding:6px 10px; border-radius:12px; font-weight:600; font-size:14px; }
+  .gem::before{content:"♦";}
+  .avatar{ width:180px; height:180px; border-radius:999px; background:#e5e7eb; margin:24px auto 10px; display:grid; place-items:center; overflow:hidden; }
+  .avatar img{ width:100%; height:100%; object-fit:cover; }
+  .hint { margin-top:auto; font-size:12px; color:#6b7280; padding:12px 16px 16px; text-align:center; }
+  .row { display:flex; justify-content:space-between; align-items:center; background:#1f2937; padding:12px 14px; border-radius:12px; }
+  .row + .row { margin-top:10px; }
+  .btn { display:inline-block; padding:10px 14px; border-radius:10px; border:0; background:#22c55e; color:#fff; font-weight:700; cursor:pointer; }
+  .nav { display:flex; justify-content:space-between; gap:8px; margin-top:14px; }
+  .nav button { flex:1; padding:10px 12px; border-radius:10px; border:1px solid #e5e7eb; background:#fff; cursor:pointer; font-weight:600; }
+  .index { text-align:center; margin-top:10px; color:#6b7280; font-size:13px; }
+</style>
 </head>
 <body>
-  <button id="enter">Start AR</button>
-  <div id="ui"><div id="hint">tap to place • drag (press) • pinch to resize</div></div>
+<div class="wrap">
+  <div class="status" id="help"></div>
+  <div class="stage">
+    <div class="card" id="card">
+      <div class="side front">
+        <div class="header">
+          <div class="name" id="name">name</div>
+          <div class="gem" id="gems">0</div>
+        </div>
+        <div class="avatar"><img id="avatar" alt="profile"/></div>
+        <div class="hint" id="hintFront"></div>
+      </div>
+      <div class="side back">
+        <div class="row"><span>username</span> <strong id="username">@handle</strong></div>
+        <div class="row"><span>bio</span> <span id="bio">—</span></div>
+        <div class="row"><span>phone</span> <strong id="phone">—</strong></div>
+        <div class="nav">
+          <button id="flipBack">flip to front</button>
+          <button id="callBtn" class="btn">call</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="index" id="index"></div>
+</div>
 
-  <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<script>
+  // --- demo data
+  const friends = [
+    { name:"john", gems:12, avatar:"https://i.pravatar.cc/300?img=12", username:"@johnny", bio:"product nerd. weekend cook.", phone:"+15550101" },
+    { name:"maya", gems:47, avatar:"https://i.pravatar.cc/300?img=5",  username:"@maya",   bio:"design + dogs.",           phone:"+15550102" },
+    { name:"dev",  gems:3,  avatar:"https://i.pravatar.cc/300?img=33", username:"@dev",    bio:"runner. reads a lot.",     phone:"+15550103" },
+  ];
 
-  <script>
-  (async function () {
-    const IMAGE_URL = 'https://images.unsplash.com/photo-1529626455594-4ff0802cfb7e?w=1200&q=80&auto=format&fit=crop';
+  const els = {
+    card: document.getElementById('card'),
+    name: document.getElementById('name'),
+    gems: document.getElementById('gems'),
+    avatar: document.getElementById('avatar'),
+    username: document.getElementById('username'),
+    bio: document.getElementById('bio'),
+    phone: document.getElementById('phone'),
+    flipBack: document.getElementById('flipBack'),
+    callBtn: document.getElementById('callBtn'),
+    index: document.getElementById('index'),
+    help: document.getElementById('help'),
+    hintFront: document.getElementById('hintFront'),
+  };
 
-    let renderer, scene, camera, reticle, imageMesh, controller;
-    let hitTestSource = null, transientHitTestSource = null;
-    let dragging = false;
+  const isTouch = navigator.maxTouchPoints > 0;
 
-    // smoothing state
-    const targetPos = new THREE.Vector3();
-    const vel = new THREE.Vector3();
-    const tmpQuat = new THREE.Quaternion();
-    let targetScale = 1;
+  // help text per platform
+  els.help.textContent = isTouch
+    ? "mobile: tap = call · long-press = more info · drag to swipe"
+    : "desktop: click = more info · double-click = call · drag to swipe";
+  els.hintFront.innerHTML = isTouch
+    ? "- tap once to call<br>- long-press to see more info<br>- swipe left/right"
+    : "- click once to see more info<br>- double-click to call<br>- drag left/right";
 
-    // pinch state (world-space)
-    let pinching = false;
-    let basePinchDist = 0;
-    let baseScale = 1;
+  let idx = 0;
+  let flipped = false;
 
-    const enterBtn = document.getElementById('enter');
+  function render(n){
+    const f = friends[n];
+    els.name.textContent = f.name;
+    els.gems.textContent = f.gems;
+    els.avatar.src = f.avatar;
+    els.username.textContent = f.username;
+    els.bio.textContent = f.bio;
+    els.phone.textContent = f.phone;
+    els.index.textContent = `${n+1} / ${friends.length}`;
+    if (flipped) flip(false);
+  }
 
-    init();
+  function flip(to=!flipped){
+    flipped = to;
+    els.card.classList.toggle('flipped', flipped);
+  }
 
-    function init() {
-      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5)); // lower = smoother
-      renderer.setSize(window.innerWidth, window.innerHeight);
-      renderer.xr.enabled = true;
-      document.body.appendChild(renderer.domElement);
+  function callFriend(){
+    const phone = friends[idx]?.phone;
+    if (!phone) { alert("no phone on file."); return; }
+    const num = phone.replace(/\s+/g,'');
+    if (/Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)) {
+      window.location.href = `tel:${num}`;
+    } else {
+      const go = confirm(`call ${friends[idx].name} at ${phone}?`);
+      if (go) window.location.href = `tel:${num}`;
+    }
+  }
 
-      if (!navigator.xr) {
-        alert('WebXR AR not available on this device/browser.');
-        return;
+  function next(dir=1){
+    idx = (idx + dir + friends.length) % friends.length;
+    render(idx);
+  }
+
+  // --- single vs double click (desktop)
+  let clickTimer = null;
+  const CLICK_DELAY = 260;
+
+  els.card.addEventListener('click', (e)=>{
+    if (isTouch) return; // handled by pointer/touch rules below
+    if (clickTimer) return; // wait to see if it becomes dblclick
+    clickTimer = setTimeout(()=>{ flip(true); clickTimer=null; }, CLICK_DELAY);
+  });
+  els.card.addEventListener('dblclick', (e)=>{
+    if (clickTimer) { clearTimeout(clickTimer); clickTimer=null; }
+    callFriend();
+  });
+
+  // --- mobile tap = call, long press = flip
+  let pressTimer = null;
+  function startLongPress(){
+    if (!isTouch) return;
+    clearTimeout(pressTimer);
+    pressTimer = setTimeout(()=>{ flip(true); }, 450); // long-press threshold
+  }
+  function cancelLongPress(){ clearTimeout(pressTimer); pressTimer=null; }
+
+  // if user taps quickly without moving → call
+  let tapStartTime = 0, tapMoved = false;
+
+  // --- interactive swipe via Pointer Events (works for mouse and touch)
+  let dragging = false, startX = 0, currentX = 0;
+  const SWIPE_THRESHOLD = 90; // px to trigger change
+  const ROTATE_FACTOR = 18;   // deg max tilt
+  const TRANSLATE_LIMIT = 140;
+
+  function setDragTransform(dx){
+    const clamped = Math.max(-TRANSLATE_LIMIT, Math.min(TRANSLATE_LIMIT, dx));
+    const rot = (clamped / TRANSLATE_LIMIT) * ROTATE_FACTOR; // tilt with drag
+    els.card.style.transition = 'none';
+    els.card.style.transform = `translateX(${clamped}px) rotate(${rot}deg) ${flipped ? 'rotateY(180deg)' : ''}`;
+  }
+
+  function resetTransform(){
+    els.card.style.transition = 'transform .38s cubic-bezier(.22,.61,.36,1)';
+    els.card.style.transform = `${flipped ? 'rotateY(180deg)' : 'translateX(0) rotate(0)'}`;
+  }
+
+  function flingOut(dir){
+    els.card.style.transition = 'transform .22s ease-out';
+    els.card.style.transform = `translateX(${dir*420}px) rotate(${dir*30}deg)`;
+    setTimeout(()=>{ next(dir); els.card.style.transition=''; els.card.style.transform=''; }, 200);
+  }
+
+  els.card.addEventListener('pointerdown', (e)=>{
+    dragging = true; startX = e.clientX; currentX = startX;
+    tapStartTime = performance.now(); tapMoved = false;
+    els.card.setPointerCapture(e.pointerId);
+    if (isTouch) startLongPress();
+  });
+
+  els.card.addEventListener('pointermove', (e)=>{
+    if (!dragging) return;
+    currentX = e.clientX;
+    const dx = currentX - startX;
+    if (Math.abs(dx) > 6) { tapMoved = true; cancelLongPress(); }
+    setDragTransform(dx);
+  });
+
+  els.card.addEventListener('pointerup', (e)=>{
+    if (!dragging) return;
+    dragging = false;
+    els.card.releasePointerCapture(e.pointerId);
+    const dx = currentX - startX;
+    cancelLongPress();
+
+    // swipe decision
+    if (Math.abs(dx) > SWIPE_THRESHOLD) {
+      flingOut(dx < 0 ? -1 : 1);
+    } else {
+      resetTransform();
+
+      // tap behaviors
+      const dt = performance.now() - tapStartTime;
+      if (isTouch && !tapMoved && dt < 250) {
+        // quick tap on mobile → call
+        callFriend();
       }
-
-      scene = new THREE.Scene();
-      camera = new THREE.PerspectiveCamera();
-      scene.add(camera);
-
-      scene.add(new THREE.HemisphereLight(0xffffff, 0xbbbbff, 0.7));
-
-      reticle = new THREE.Mesh(
-        new THREE.RingGeometry(0.08, 0.1, 32).rotateX(-Math.PI/2),
-        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.75 })
-      );
-      reticle.matrixAutoUpdate = false;
-      reticle.visible = false;
-      scene.add(reticle);
-
-      controller = renderer.xr.getController(0);
-      controller.addEventListener('select', onSelectPlace);
-      controller.addEventListener('selectstart', () => dragging = true);
-      controller.addEventListener('selectend', () => { dragging = false; pinching = false; basePinchDist = 0; });
-      scene.add(controller);
-
-      window.addEventListener('resize', () => renderer.setSize(window.innerWidth, window.innerHeight));
-      enterBtn.addEventListener('click', startAR);
-
-      // minimal pointer bookkeeping to know when two fingers are down
-      const down = new Set();
-      document.addEventListener('pointerdown', (e) => { down.add(e.pointerId); if (down.size === 2) startPinch(); }, { passive: true });
-      document.addEventListener('pointerup',   (e) => { down.delete(e.pointerId); if (down.size < 2) endPinch(); },   { passive: true });
-      document.addEventListener('pointercancel',(e)=> { down.delete(e.pointerId); if (down.size < 2) endPinch(); },   { passive: true });
-
-      function startPinch(){ if (imageMesh?.visible) pinching = true; }
-      function endPinch(){ pinching = false; basePinchDist = 0; }
+      // desktop tap handled in click listener
     }
+  });
 
-    async function startAR() {
-      const sessionInit = {
-        requiredFeatures: ['hit-test'],
-        optionalFeatures: ['dom-overlay'],
-        domOverlay: { root: document.body }
-      };
-      const session = await navigator.xr.requestSession('immersive-ar', sessionInit);
+  // buttons
+  els.flipBack.addEventListener('click', ()=>flip(false));
+  els.callBtn.addEventListener('click', callFriend);
 
-      const viewerSpace = await session.requestReferenceSpace('viewer');
-      hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+  // keyboard (desktop nicety)
+  window.addEventListener('keydown', (e)=>{
+    if (e.key === 'ArrowRight') next(1);
+    if (e.key === 'ArrowLeft') next(-1);
+  });
 
-      try {
-        transientHitTestSource = await session.requestHitTestSourceForTransientInput({ profile: 'screen-touch' });
-      } catch (e) {
-        transientHitTestSource = null;
-      }
-
-      renderer.xr.setReferenceSpaceType('local');
-      await renderer.xr.setSession(session);
-
-      enterBtn.style.display = 'none';
-      renderer.setAnimationLoop(renderAR);
-
-      if (!imageMesh) {
-        imageMesh = await makeImagePlane(IMAGE_URL);
-        imageMesh.visible = false;
-        scene.add(imageMesh);
-      }
-    }
-
-    async function makeImagePlane(url) {
-      const tex = await new THREE.TextureLoader().loadAsync(url);
-      tex.colorSpace = THREE.SRGBColorSpace;
-      const aspect = tex.image.width / tex.image.height;
-      const width = 0.6, height = width / aspect;
-
-      const mesh = new THREE.Mesh(
-        new THREE.PlaneGeometry(width, height),
-        new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide })
-      );
-      mesh.matrixAutoUpdate = true;
-      targetScale = 1;
-      mesh.scale.setScalar(targetScale);
-      return mesh;
-    }
-
-    function onSelectPlace() {
-      if (!reticle.visible || !imageMesh) return;
-      imageMesh.visible = true;
-
-      // snap to reticle initially
-      const m = new THREE.Matrix4().copy(reticle.matrix);
-      imageMesh.position.setFromMatrixPosition(m);
-
-      // face camera, keep upright
-      const cam = renderer.xr.getCamera(camera);
-      imageMesh.lookAt(cam.position);
-      imageMesh.rotation.x = 0;
-      imageMesh.rotation.z = 0;
-
-      // set smoothing targets
-      targetPos.copy(imageMesh.position);
-      targetScale = imageMesh.scale.x;
-      vel.set(0,0,0);
-    }
-
-    // critically-damped spring toward target (per-axis)
-    function smoothDamp(current, target, velocity, smoothTime, delta) {
-      const omega = 2 / Math.max(0.0001, smoothTime);
-      const x = omega * delta;
-      const exp = 1 / (1 + x + 0.48*x*x + 0.235*x*x*x);
-      const change = current.clone().sub(target);
-      const temp = velocity.clone().addScaledVector(change, omega).multiplyScalar(delta);
-      const newVel = velocity.clone().sub(temp.multiplyScalar(omega)).multiplyScalar(exp);
-      const newPos = current.clone().sub(change).addScaledVector(temp, exp);
-      return { pos: newPos, vel: newVel };
-    }
-
-    function renderAR(t, frame) {
-      const refSpace = renderer.xr.getReferenceSpace();
-      if (!frame || !refSpace) { renderer.render(scene, camera); return; }
-      const dt = Math.min(0.05, renderer.xr.isPresenting ? (frame.getViewerPose(refSpace) ? 1/60 : 1/60) : 1/60); // approx; browsers hide true dt
-
-      // center-screen hit test for reticle
-      if (hitTestSource) {
-        const hits = frame.getHitTestResults(hitTestSource);
-        if (hits.length) {
-          const pose = hits[0].getPose(refSpace);
-          reticle.visible = true;
-          reticle.matrix.fromArray(pose.transform.matrix);
-        } else {
-          reticle.visible = false;
-        }
-      }
-
-      if (imageMesh?.visible) {
-        // DRAG: use transient hit under finger to set target position; smooth toward it
-        if (dragging && transientHitTestSource) {
-          const trs = frame.getHitTestResultsForTransientInput(transientHitTestSource);
-          if (trs.length && trs[0].results.length) {
-            const pose = trs[0].results[0].getPose(refSpace);
-            targetPos.setFromMatrixPosition(new THREE.Matrix4().fromArray(pose.transform.matrix));
-          }
-        }
-
-        // PINCH: compute world-space distance between first two touches
-        if (pinching && transientHitTestSource) {
-          const trs = frame.getHitTestResultsForTransientInput(transientHitTestSource);
-          if (trs.length >= 2 && trs[0].results.length && trs[1].results.length) {
-            const p0 = new THREE.Vector3().setFromMatrixPosition(new THREE.Matrix4().fromArray(trs[0].results[0].getPose(refSpace).transform.matrix));
-            const p1 = new THREE.Vector3().setFromMatrixPosition(new THREE.Matrix4().fromArray(trs[1].results[0].getPose(refSpace).transform.matrix));
-            const dist = p0.distanceTo(p1);
-
-            if (basePinchDist === 0) {
-              basePinchDist = dist;
-              baseScale = targetScale;
-            } else if (dist > 0) {
-              const raw = (dist / basePinchDist) * baseScale;
-              // ease the target scale; clamp range
-              targetScale = THREE.MathUtils.clamp(raw, 0.2, 4.0);
-            }
-          }
-        }
-
-        // smooth position
-        const s = smoothDamp(imageMesh.position, targetPos, vel, /*smoothTime*/ 0.06, dt);
-        imageMesh.position.copy(s.pos); vel.copy(s.vel);
-
-        // face camera, keep upright (also smoothed a bit)
-        const cam = renderer.xr.getCamera(camera);
-        imageMesh.lookAt(cam.position);
-        imageMesh.rotation.x = 0;
-        imageMesh.rotation.z = 0;
-
-        // smooth scale (lerp)
-        const k = 1 - Math.pow(0.0001, dt * 60); // frame-rate independent
-        const newScale = THREE.MathUtils.lerp(imageMesh.scale.x, targetScale, k);
-        imageMesh.scale.setScalar(newScale);
-      }
-
-      renderer.render(scene, camera);
-    }
-  })();
-  </script>
+  // init
+  render(idx);
+</script>
 </body>
 </html>
